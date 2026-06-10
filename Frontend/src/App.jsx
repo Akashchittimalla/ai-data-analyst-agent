@@ -44,6 +44,17 @@ async function apiSchema() {
   return res.json();
 }
 
+async function apiUpload(file) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Upload failed" }));
+    throw new Error(err.detail || "Upload failed");
+  }
+  return res.json();
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function fmtVal(v) {
   if (v === null || v === undefined) return "—";
@@ -54,6 +65,12 @@ function fmtVal(v) {
     return v.toFixed(2);
   }
   return String(v);
+}
+
+function renderInlineMarkdown(text) {
+  return String(text)
+    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.*?)\*/g, "<em>$1</em>");
 }
 
 function highlightSQL(sql) {
@@ -274,8 +291,8 @@ function InsightsPanel({ insights, anomalies }) {
               {ins.icon}
             </div>
             <div>
-              <div style={{ fontWeight: 500, fontSize: 13, color: "#e8e9eb", marginBottom: 3 }}>{ins.title}</div>
-              <div style={{ fontSize: 13, color: "#9ca3af", lineHeight: 1.65 }}>{ins.text}</div>
+              <div dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(ins.title) }} style={{ fontWeight: 500, fontSize: 13, color: "#e8e9eb", marginBottom: 3 }} />
+              <div dangerouslySetInnerHTML={{ __html: renderInlineMarkdown(ins.text) }} style={{ fontSize: 13, color: "#9ca3af", lineHeight: 1.65 }} />
             </div>
           </div>
         );
@@ -298,6 +315,57 @@ function InsightsPanel({ insights, anomalies }) {
             ))}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Upload Panel ──────────────────────────────────────────────────────────────
+function UploadPanel({ onUpload }) {
+  const [uploading, setUploading] = useState(false);
+  const [status,    setStatus]    = useState(null);
+  const inputRef = useRef(null);
+
+  async function handleFile(file) {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      setStatus({ ok: false, msg: "Only .csv files are supported" });
+      return;
+    }
+    setUploading(true);
+    setStatus(null);
+    try {
+      const r = await apiUpload(file);
+      setStatus({ ok: true, msg: `"${r.table}" loaded — ${r.columns.length} columns` });
+      onUpload();
+    } catch (e) {
+      setStatus({ ok: false, msg: e.message });
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div style={{ padding: "10px 14px" }}>
+      <div
+        role="button"
+        onClick={() => !uploading && inputRef.current?.click()}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}
+        style={{ border: "1px dashed rgba(255,255,255,0.15)", borderRadius: 8, padding: "14px 10px", textAlign: "center", cursor: uploading ? "wait" : "pointer", transition: "border-color 0.2s" }}
+        onMouseEnter={(e) => { if (!uploading) e.currentTarget.style.borderColor = "#34d399"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.15)"; }}
+      >
+        <input ref={inputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
+        <p style={{ fontSize: 12, color: uploading ? "#34d399" : "#6b7280", margin: 0 }}>
+          {uploading ? "Uploading..." : "↑ Drop CSV or click to upload"}
+        </p>
+        <p style={{ fontSize: 11, color: "#374151", margin: "4px 0 0" }}>Table auto-created from filename</p>
+      </div>
+      {status && (
+        <p style={{ fontSize: 11, margin: "8px 0 0", color: status.ok ? "#34d399" : "#f87171" }}>
+          {status.ok ? "✓ " : "✗ "}{status.msg}
+        </p>
       )}
     </div>
   );
@@ -357,7 +425,8 @@ export default function App() {
   const [schema,    setSchema]    = useState(null);
   const [step,      setStep]      = useState(0);
 
-  useEffect(() => { apiSchema().then(setSchema).catch(() => {}); }, []);
+  const refreshSchema = () => apiSchema().then(setSchema).catch(() => {});
+  useEffect(() => { refreshSchema(); }, []);
 
   async function runAnalysis() {
     if (!question.trim() || loading) return;
@@ -415,6 +484,11 @@ export default function App() {
             <Panel>
               <PanelHeader icon="⊞" label="Database Schema" iconBg="rgba(96,165,250,0.12)" iconColor="#60a5fa" />
               <SchemaPanel schema={schema} />
+            </Panel>
+
+            <Panel>
+              <PanelHeader icon="↑" label="Upload CSV" iconBg="rgba(52,211,153,0.12)" iconColor="#34d399" />
+              <UploadPanel onUpload={refreshSchema} />
             </Panel>
 
             <Panel>
@@ -514,7 +588,7 @@ export default function App() {
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "48px 24px", gap: 12, color: "#6b7280", textAlign: "center" }}>
                   <div style={{ fontSize: 36, opacity: 0.25 }}>◈</div>
                   <p style={{ fontSize: 13, lineHeight: 1.7, maxWidth: 320, margin: 0 }}>
-                    Ask a business question above. The agent generates SQL, executes it on DuckDB, detects anomalies, and explains findings using Grok.
+                    Ask a business question above. The agent generates SQL, executes it on DuckDB, detects anomalies, and explains findings using Claude.
                   </p>
                 </div>
               </Panel>

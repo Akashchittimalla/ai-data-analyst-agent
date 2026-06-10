@@ -5,12 +5,13 @@ Pipeline: Question -> SQL generation -> DuckDB -> anomaly detection -> insights 
 
 import os
 import re
+import tempfile
 from typing import Optional
 
 import anthropic
 import duckdb
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -250,6 +251,38 @@ async def analyze(req: AnalysisRequest):
         raise HTTPException(status_code=500, detail=f"Anthropic API error: {exc.message}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/upload")
+async def upload_csv(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+
+    raw = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(file.filename)[0]).strip("_") or "uploaded"
+    if raw[0].isdigit():
+        raw = "t_" + raw
+    table_name = raw
+
+    content = await file.read()
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="wb") as f:
+        f.write(content)
+        tmp_path = f.name
+
+    try:
+        safe_path = tmp_path.replace("\\", "/")
+        con = get_db()
+        try:
+            con.execute(
+                f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_csv_auto('{safe_path}')"
+            )
+            cols = con.execute(f"DESCRIBE {table_name}").fetchall()
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Could not parse CSV: {exc}")
+        finally:
+            con.close()
+        return {"table": table_name, "columns": [{"name": c[0], "type": c[1]} for c in cols]}
+    finally:
+        os.unlink(tmp_path)
 
 
 @app.post("/query")

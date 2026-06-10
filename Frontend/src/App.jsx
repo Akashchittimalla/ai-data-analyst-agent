@@ -18,10 +18,10 @@ const EXAMPLES = [
 
 const PROCESSING_STEPS = [
   "Parsing your question...",
-  "Generating SQL with Grok...",
+  "Generating SQL with Claude...",
   "Executing on DuckDB...",
   "Running anomaly detection...",
-  "Generating insights with Grok...",
+  "Generating insights with Claude...",
   "Building chart configuration...",
 ];
 

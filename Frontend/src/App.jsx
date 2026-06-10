@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 // ── Config ─────────────────────────────────────────────────────────────────────
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 const COLORS = ["#7c6aff", "#34d399", "#60a5fa", "#fbbf24", "#f87171", "#a78bfa", "#fb923c"];
 

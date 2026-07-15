@@ -82,17 +82,30 @@ ANTHROPIC_API_KEY=sk-ant-... docker compose -f Root/docker-compose.yml up --buil
 |----------|----------|---------|-------------|
 | `ANTHROPIC_API_KEY` | Yes | — | Your Anthropic API key |
 | `ANTHROPIC_MODEL` | No | `claude-haiku-4-5-20251001` | Override the Claude model |
+| `CORS_ORIGINS` | No | `http://localhost:5173` | Comma-separated browser origins allowed to call the API |
+| `API_ACCESS_KEY` | No | — | Shared API key required through `X-API-Key`; suitable for internal deployments |
+| `MAX_UPLOAD_BYTES` | No | `10485760` | Maximum CSV upload size (10 MB) |
+| `MAX_QUERY_ROWS` | No | `500` | Maximum rows returned by an analysis/query |
 
 Set these in `Backend/.env` for local development.
+
+Never commit a real API key. The included `.gitignore` excludes `.env` files; use
+`Backend/.env.example` as the safe template. If `API_ACCESS_KEY` is enabled, set
+the same value as `VITE_API_KEY` for the bundled frontend. This is appropriate
+for a private/internal tool, but a public deployment should use real user
+authentication (for example OAuth/OIDC with server-side sessions) rather than a
+browser-visible shared key.
 
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Liveness check |
+| `GET` | `/metrics` | Request/error/latency counters (requires API key when configured) |
 | `GET` | `/schema` | Returns table schemas |
 | `POST` | `/analyze` | Main analysis pipeline |
-| `POST` | `/query` | Run a raw SELECT query |
+| `POST` | `/query` | Run one validated, read-only SELECT/CTE query |
+| `POST` | `/upload` | Load a size-limited CSV as a DuckDB table |
 
 ### POST /analyze
 
@@ -133,9 +146,22 @@ The app seeds a DuckDB database with synthetic 2023–2024 retail data on first 
 
 | Table | Key Columns |
 |-------|-------------|
-| `sales` | date, product, category, region, revenue, units, cost |
+| `sales` | date, customer_id, product_id, product, category, region, revenue, units, cost |
 | `customers` | customer_id, name, segment, region, acq_date, lifetime_val |
 | `products` | product_id, name, category, price, cost, launch_date |
 
 Regions: North, South, East, West  
 Categories: Electronics, Apparel, Home, Sports
+
+`sales.customer_id` joins `customers.customer_id`, and `sales.product_id` joins
+`products.product_id`, enabling cross-table customer and product analysis. CSV
+tables uploaded through the UI are included automatically in the live schema
+given to the SQL-generation model.
+
+## Reliability and security notes
+
+- Generated and raw queries are limited to one read-only `SELECT` or CTE statement; mutation, file, extension, and admin keywords are rejected.
+- Results and uploads have configurable limits to protect local resources.
+- CORS defaults to the local Vite origin instead of accepting every website.
+- The `/metrics` endpoint exposes dependency-free request count, error count, and average-latency counters for basic monitoring.
+- Run the regression suite with `cd Backend` then `python -m unittest discover -s tests`.

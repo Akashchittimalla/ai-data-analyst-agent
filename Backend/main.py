@@ -6,37 +6,59 @@ Pipeline: Question -> SQL generation -> DuckDB -> anomaly detection -> insights 
 import os
 import re
 import tempfile
+import time
 from typing import Optional
 
 import anthropic
 import duckdb
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from anomaly_detector import detect_anomalies
 from chart_recommender import recommend_chart
 from insight_generator import generate_insights
+from sql_safety import validate_read_sql as validate_safe_read_sql
 from xai_client import AnthropicConfigError, chat_completion
 
 load_dotenv()
 
 app = FastAPI(title="AI Data Analyst Agent", version="1.0.0")
 
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+MAX_QUERY_ROWS = int(os.getenv("MAX_QUERY_ROWS", "500"))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
-DB_PATH = "data/analytics.duckdb"
 
+@app.middleware("http")
+async def collect_metrics(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    REQUEST_METRICS["requests"] += 1
+    REQUEST_METRICS["total_latency_ms"] += (time.perf_counter() - started) * 1000
+    if response.status_code >= 400:
+        REQUEST_METRICS["query_errors"] += 1
+    return response
+
+DB_PATH = os.getenv("DB_PATH", "data/analytics.duckdb")
+
+REQUEST_METRICS = {"requests": 0, "analyses": 0, "uploads": 0, "query_errors": 0, "total_latency_ms": 0.0}
 
 class AnalysisRequest(BaseModel):
-    question: str
-    max_rows: Optional[int] = 500
+    question: str = Field(min_length=3, max_length=500)
+    max_rows: int = Field(default=MAX_QUERY_ROWS, ge=1, le=MAX_QUERY_ROWS)
 
 
 class AnalysisResponse(BaseModel):
@@ -53,6 +75,36 @@ def get_db():
     return duckdb.connect(DB_PATH)
 
 
+def require_api_key(x_api_key: Optional[str] = Header(default=None)):
+    """Enable shared-key protection by setting API_ACCESS_KEY in deployment."""
+    expected = os.getenv("API_ACCESS_KEY")
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+
+def validate_read_sql(sql: str) -> str:
+    """Translate pure SQL validation failures into a safe API response."""
+    try:
+        return validate_safe_read_sql(sql)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def database_schema_context() -> str:
+    """Build a live schema summary so uploaded CSV tables are queryable by the agent."""
+    con = get_db()
+    try:
+        tables = con.execute("SHOW TABLES").fetchall()
+        parts = []
+        for (table,) in tables[:25]:
+            columns = con.execute(f'DESCRIBE "{table}"').fetchall()
+            rendered = ", ".join(f"{name} {data_type}" for name, data_type, *_ in columns[:50])
+            parts.append(f"- {table}({rendered})")
+        return "\n".join(parts)
+    finally:
+        con.close()
+
+
 def init_database():
     os.makedirs("data", exist_ok=True)
     con = duckdb.connect(DB_PATH)
@@ -60,6 +112,8 @@ def init_database():
         """
         CREATE TABLE IF NOT EXISTS sales (
             date        DATE,
+            customer_id VARCHAR,
+            product_id  VARCHAR,
             product     VARCHAR,
             category    VARCHAR,
             region      VARCHAR,
@@ -69,6 +123,14 @@ def init_database():
         )
         """
     )
+    # Lightweight forward migration for databases created by earlier versions.
+    existing = {row[0] for row in con.execute("DESCRIBE sales").fetchall()}
+    if "customer_id" not in existing:
+        con.execute("ALTER TABLE sales ADD COLUMN customer_id VARCHAR")
+        con.execute("UPDATE sales SET customer_id = 'C' || lpad(CAST((rowid % 3000) + 1 AS VARCHAR), 5, '0')")
+    if "product_id" not in existing:
+        con.execute("ALTER TABLE sales ADD COLUMN product_id VARCHAR")
+        con.execute("UPDATE sales SET product_id = lower(replace(product, ' ', '_'))")
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS customers (
@@ -106,16 +168,11 @@ def init_database():
 def generate_sql(question: str) -> str:
     """Use Claude/Anthropic to generate SQL for the question."""
 
-    schema = """
-    Tables:
-    - sales(date DATE, product VARCHAR, category VARCHAR, region VARCHAR, revenue DECIMAL, units INTEGER, cost DECIMAL)
-    - customers(customer_id VARCHAR, name VARCHAR, segment VARCHAR, region VARCHAR, acq_date DATE, lifetime_val DECIMAL)
-    - products(product_id VARCHAR, name VARCHAR, category VARCHAR, price DECIMAL, cost DECIMAL, launch_date DATE)
-
-    Data context: 2023-2024 sales data. Regions: North, South, East, West.
-    Categories: Electronics, Apparel, Home, Sports.
-    Q3 2023 had a supply chain disruption in Electronics causing ~22% revenue drop.
-    """
+    schema = database_schema_context()
+    context = """Data context: seeded retail data covers 2023-2024. Regions: North, South, East, West.
+    Categories: Electronics, Apparel, Home, Sports. sales.customer_id joins customers.customer_id;
+    sales.product_id joins products.product_id. Q3 2023 contains a simulated Electronics supply-chain disruption.
+    Uploaded CSV tables may also appear in the schema."""
 
     sql = chat_completion(
         messages=[
@@ -125,12 +182,13 @@ def generate_sql(question: str) -> str:
                     "You are an expert DuckDB SQL analyst.\n"
                     "Return ONLY a valid DuckDB SELECT query - no explanation, no markdown, no backticks.\n"
                     "Use DuckDB syntax: DATE_TRUNC(), strftime(), QUALIFY, window functions like LAG() OVER().\n"
-                    "Always include meaningful aggregations. Make queries useful for charting."
+                    "Always include meaningful aggregations. Make queries useful for charting. "
+                    "Never mutate data or use external file/database commands."
                 ),
             },
             {
                 "role": "user",
-                "content": f"Schema:\n{schema}\n\nQuestion: {question}",
+                "content": f"Schema:\n{schema}\n\n{context}\n\nQuestion: {question}",
             },
         ],
         max_tokens=600,
@@ -172,8 +230,9 @@ def repair_sql(question: str, sql: str, error_message: str) -> str:
 def run_sql(sql: str, max_rows: int = 500):
     con = get_db()
     try:
-        clean_sql = sql.strip().rstrip(";")
-        result = con.execute(clean_sql + f" LIMIT {max_rows}")
+        clean_sql = validate_read_sql(sql)
+        bounded_rows = min(max(1, max_rows), MAX_QUERY_ROWS)
+        result = con.execute(f"SELECT * FROM ({clean_sql}) AS analysis_result LIMIT {bounded_rows}")
         columns = [desc[0] for desc in result.description]
         tuples = result.fetchall()
         rows = []
@@ -203,7 +262,14 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/schema")
+@app.get("/metrics", dependencies=[Depends(require_api_key)])
+async def metrics():
+    """Small dependency-free operational counters for local monitoring."""
+    average_latency = REQUEST_METRICS["total_latency_ms"] / max(REQUEST_METRICS["requests"], 1)
+    return {**REQUEST_METRICS, "avg_latency_ms": round(average_latency, 2), "max_query_rows": MAX_QUERY_ROWS, "max_upload_bytes": MAX_UPLOAD_BYTES}
+
+
+@app.get("/schema", dependencies=[Depends(require_api_key)])
 async def get_schema():
     con = get_db()
     try:
@@ -217,9 +283,10 @@ async def get_schema():
         con.close()
 
 
-@app.post("/analyze", response_model=AnalysisResponse)
+@app.post("/analyze", response_model=AnalysisResponse, dependencies=[Depends(require_api_key)])
 async def analyze(req: AnalysisRequest):
     try:
+        REQUEST_METRICS["analyses"] += 1
         sql = generate_sql(req.question)
         try:
             rows, columns = run_sql(sql, req.max_rows)
@@ -253,7 +320,7 @@ async def analyze(req: AnalysisRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/upload")
+@app.post("/upload", dependencies=[Depends(require_api_key)])
 async def upload_csv(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")
@@ -263,12 +330,15 @@ async def upload_csv(file: UploadFile = File(...)):
         raw = "t_" + raw
     table_name = raw
 
-    content = await file.read()
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"CSV exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="wb") as f:
         f.write(content)
         tmp_path = f.name
 
     try:
+        REQUEST_METRICS["uploads"] += 1
         safe_path = tmp_path.replace("\\", "/")
         con = get_db()
         try:
@@ -285,10 +355,9 @@ async def upload_csv(file: UploadFile = File(...)):
         os.unlink(tmp_path)
 
 
-@app.post("/query")
+@app.post("/query", dependencies=[Depends(require_api_key)])
 async def raw_query(body: dict):
     sql = body.get("sql", "").strip()
-    if not sql.upper().startswith("SELECT"):
-        raise HTTPException(status_code=400, detail="Only SELECT queries allowed.")
+    validate_read_sql(sql)
     rows, columns = run_sql(sql)
     return {"data": rows, "columns": columns, "row_count": len(rows)}

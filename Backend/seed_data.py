@@ -115,11 +115,13 @@ def _seed_sales(con):
             units = random.randint(1, 4)
             revenue = round(price * units * random.uniform(0.92, 1.08), 2)
             cost = round(revenue * random.uniform(0.35, 0.55), 2)
-            rows.append((current, product, cat, region, revenue, units, cost))
+            product_id = product.lower().replace(" ", "_")
+            customer_id = f"C{random.randint(1, 3000):05d}"
+            rows.append((current, customer_id, product_id, product, cat, region, revenue, units, cost))
 
         current += timedelta(days=1)
 
-    con.executemany("INSERT INTO sales VALUES (?,?,?,?,?,?,?)", rows)
+    con.executemany("INSERT INTO sales VALUES (?,?,?,?,?,?,?,?,?)", rows)
 
 
 if __name__ == "__main__":
@@ -128,7 +130,7 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     con = duckdb.connect("data/analytics.duckdb")
     for tbl in [
-        "CREATE TABLE IF NOT EXISTS sales(date DATE, product VARCHAR, category VARCHAR, region VARCHAR, revenue DECIMAL(12,2), units INTEGER, cost DECIMAL(12,2))",
+        "CREATE TABLE IF NOT EXISTS sales(date DATE, customer_id VARCHAR, product_id VARCHAR, product VARCHAR, category VARCHAR, region VARCHAR, revenue DECIMAL(12,2), units INTEGER, cost DECIMAL(12,2))",
         "CREATE TABLE IF NOT EXISTS customers(customer_id VARCHAR, name VARCHAR, segment VARCHAR, region VARCHAR, acq_date DATE, lifetime_val DECIMAL(12,2))",
         "CREATE TABLE IF NOT EXISTS products(product_id VARCHAR, name VARCHAR, category VARCHAR, price DECIMAL(10,2), cost DECIMAL(10,2), launch_date DATE)",
     ]:

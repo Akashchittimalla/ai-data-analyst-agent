@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from "react";
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
+const API_KEY = import.meta.env.VITE_API_KEY;
+const apiHeaders = API_KEY ? { "X-API-Key": API_KEY } : {};
 
 const COLORS = ["#7c6aff", "#34d399", "#60a5fa", "#fbbf24", "#f87171", "#a78bfa", "#fb923c"];
 
@@ -29,7 +31,7 @@ const PROCESSING_STEPS = [
 async function apiAnalyze(question) {
   const res = await fetch(`${API_BASE}/analyze`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...apiHeaders },
     body: JSON.stringify({ question, max_rows: 500 }),
   });
   if (!res.ok) {
@@ -40,14 +42,14 @@ async function apiAnalyze(question) {
 }
 
 async function apiSchema() {
-  const res = await fetch(`${API_BASE}/schema`);
+  const res = await fetch(`${API_BASE}/schema`, { headers: apiHeaders });
   return res.json();
 }
 
 async function apiUpload(file) {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+  const res = await fetch(`${API_BASE}/upload`, { method: "POST", headers: apiHeaders, body: form });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Upload failed" }));
     throw new Error(err.detail || "Upload failed");
@@ -468,7 +470,7 @@ export default function App() {
           <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#7c6aff,#a78bfa)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>◈</div>
           <div>
             <p style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>AI Data Analyst Agent</p>
-            <p style={{ fontSize: 12, color: "#6b7280", margin: 0 }}>Claude · LangChain · DuckDB · FastAPI · React</p>
+            <p style={{ fontSize: 12, color: "#6b7280", margin: 0 }}>Claude · DuckDB · FastAPI · React</p>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 20, color: "#34d399", border: "0.5px solid rgba(52,211,153,0.3)", background: "rgba(52,211,153,0.08)" }}>● Live</span>
